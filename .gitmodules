@@ -1,0 +1,3 @@
+[submodule "swimming-recognition-lap-counting"]
+	path = swimming-recognition-lap-counting
+	url = https://github.com/brunnergino/swimming-recognition-lap-counting
