@@ -17,7 +17,7 @@ num_classes = len(labels)  # The output is prediction results
 
 SEED = 1234
 
-model_path = "NetModel_seq90.pth"
+model_path = "NetModel.pth"
 
 
 def set_seeds(seed=1234):
@@ -177,16 +177,16 @@ class CustomDataset(Dataset):
 
 # Load data into a pandas DataFrame (assuming it's named 'df')
 # Prepare data by converting it into a format suitable for the custom dataset
-train_data = df_train.values.reshape(-1, sample_len, 10)  # Reshape to (num_samples, sequence_length, num_features)
-validate_data = df_validate.values.reshape(-1, sample_len, 10)
-test_data = df_test.values.reshape(-1, sample_len, 10)
+train_data = df_train.values.reshape(-1, sample_len, input_channels_count+1)  # Reshape to (num_samples, sequence_length, num_features)
+validate_data = df_validate.values.reshape(-1, sample_len, input_channels_count+1)
+test_data = df_test.values.reshape(-1, sample_len, input_channels_count+1)
 
 train_dataset = CustomDataset(train_data)
 validate_dataset = CustomDataset(validate_data)
 test_dataset = CustomDataset(test_data)
 
 # Create data loaders
-batch_size = 2*4096 #32
+batch_size = 128 #4096 #32
 kwargs = {'num_workers': 8, 'pin_memory': True} if device == 'cuda' else {}
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, **kwargs)
 validate_loader = DataLoader(validate_dataset, batch_size=batch_size, shuffle=False)
@@ -263,11 +263,10 @@ def train(num_epochs, continue_while_accuracy_is_improving=False):
 
 
 # Function to test the model
-def test():
+def test(model_path):
     # Load the model that we saved at the end of the training loop
     model = CNNModel(in_ch=input_channels_count, num_classes=num_classes)
-    path = "NetModel_seq90.pth"
-    model.load_state_dict(torch.load(path))
+    model.load_state_dict(torch.load(model_path))
 
     running_accuracy = 0
     total = 0
@@ -286,11 +285,10 @@ def test():
     # Optional: Function to test which species were easier to predict
 
 
-def test_species():
+def test_species(model_path):
     # Load the model that we saved at the end of the training loop
     model = CNNModel(in_ch=input_channels_count, num_classes=num_classes)
-    path = "NetModel_seq90.pth"
-    model.load_state_dict(torch.load(path))
+    model.load_state_dict(torch.load(model_path))
 
     labels_length = len(labels)  # how many labels of Irises we have. = 3 in our database.
     labels_correct = list(0. for i in range(
@@ -318,8 +316,8 @@ def test_species():
 model.to(device)
 model.train()
 
-num_epochs = 3
+num_epochs = 10
 train(num_epochs, continue_while_accuracy_is_improving=True)
 print('Finished Training\n')
-test()
-# test_species()
+test(model_path)
+# test_species(model_path)
