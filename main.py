@@ -7,9 +7,12 @@ import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import confusion_matrix
 import torch.nn.functional as Fun
+
+torch.backends.cudnn.benchmark = True
 
 # 30 Hz data, sample_len sequence (sample_len/30 seconds)
 sample_len = 180
@@ -113,7 +116,7 @@ def load_data():
 
 class CNNModel(nn.Module):
     # tests with batchnorm and dropout did not give better accuracy
-    def __init__(self, in_ch, num_classes, do_batchnorm=False, do_dropout=False):
+    def __init__(self, in_ch, num_classes, do_batchnorm=1, do_dropout=False):
         super(CNNModel, self).__init__()
         nn_size = [59, 19, 5, 1]  # [160, 40, 10, 1] # [59, 22, 10, 5, 1]  #
         drop_prob = [0.3, 0.2, 0.2, 0.1, 0.1, 0.1]
@@ -121,38 +124,39 @@ class CNNModel(nn.Module):
         self.do_dropout = do_dropout
 
         self.conv1 = nn.Conv1d(in_channels=in_ch, out_channels=nn_size[0], kernel_size=3, stride=1)
-        self.drop1 = nn.Dropout(drop_prob[0])
-        self.bn1 = nn.BatchNorm1d(nn_size[0])
         self.elu1 = nn.ELU()
         self.max_pool1 = nn.MaxPool1d(kernel_size=3, stride=1)
+        self.drop1 = nn.Dropout(drop_prob[0])
+        self.bn1 = nn.BatchNorm1d(nn_size[0])
 
         self.conv2 = nn.Conv1d(nn_size[0], nn_size[1], kernel_size=3, stride=1)
-        self.drop2 = nn.Dropout(drop_prob[1])
-        self.bn2 = nn.BatchNorm1d(nn_size[1])
         self.elu2 = nn.ELU()
         self.max_pool2 = nn.MaxPool1d(kernel_size=3, stride=1)
+        self.drop2 = nn.Dropout(drop_prob[1])
+        self.bn2 = nn.BatchNorm1d(nn_size[1])
 
         self.conv3 = nn.Conv1d(nn_size[1], nn_size[2], kernel_size=3, stride=1)
-        self.drop3 = nn.Dropout(drop_prob[2])
-        self.bn3 = nn.BatchNorm1d(nn_size[2])
         self.elu3 = nn.ELU()
         self.max_pool3 = nn.MaxPool1d(kernel_size=3, stride=1)
+        self.drop3 = nn.Dropout(drop_prob[2])
+        self.bn3 = nn.BatchNorm1d(nn_size[2])
 
         self.conv4 = nn.Conv1d(nn_size[2], nn_size[3], kernel_size=3, stride=1)
-        self.drop4 = nn.Dropout(drop_prob[3])
-        self.bn4 = nn.BatchNorm1d(nn_size[3])
         self.elu4 = nn.ELU()
         self.max_pool4 = nn.MaxPool1d(kernel_size=3, stride=1)
+        self.drop4 = nn.Dropout(drop_prob[3])
+        self.bn4 = nn.BatchNorm1d(nn_size[3])
 
-        # self.conv5 = nn.Conv1d(nn_size[3], nn_size[4], kernel_size=3, stride=1)
-        # self.drop5 = nn.Dropout(drop_prob[4])
-        # self.bn5 = nn.BatchNorm1d(nn_size[4])
-        # self.elu5 = nn.ELU()
-        # self.max_pool5 = nn.MaxPool1d(kernel_size=3, stride=1)
+        if len(nn_size) == 5:
+            self.conv5 = nn.Conv1d(nn_size[3], nn_size[4], kernel_size=3, stride=1)
+            self.elu5 = nn.ELU()
+            self.max_pool5 = nn.MaxPool1d(kernel_size=3, stride=1)
+            self.drop5 = nn.Dropout(drop_prob[4])
+            self.bn5 = nn.BatchNorm1d(nn_size[4])
 
         self.fc = nn.Linear(in_features=sample_len - len(nn_size) * 4, out_features=128)
-        self.drop_fc = nn.Dropout(drop_prob[5])
         self.elu_fc = nn.ELU()
+        self.drop_fc = nn.Dropout(drop_prob[5])
 
         self.fc2 = nn.Linear(in_features=128, out_features=num_classes)
         self.softmax = nn.Softmax(dim=1)
@@ -211,21 +215,57 @@ class CNNModel(nn.Module):
 
 # Define a custom dataset
 class CustomDataset(Dataset):
-    def __init__(self, data, augmentate=False):
+    def __init__(self, data, augmentate=False, shuffle=False, rand_offset=False):
         self.data = data
         self.augmentate = augmentate
+        # add manual shuffling, cause DataLoader shuffling have troubles with cuda
+        self.shuffle = shuffle
+        # add data shift
+        self.rand_offset = rand_offset
 
     def __getitem__(self, index):
-        inputs = torch.tensor(self.data[index][:, :-1], dtype=torch.float32)
+        if self.shuffle:
+            index = int(torch.randint(0, self.data.shape[0], (1,)))
+        inputs = torch.tensor(self.data[index][:, :], dtype=torch.float32)
+        if self.rand_offset and index < self.data.shape[0] - 1:
+            # get next sequence for data offset
+            inputs_next = torch.tensor(self.data[index + 1][:, :], dtype=torch.float32)
+            # add rand shift to next data sequence
+            max_offset = inputs.shape[0]
+            rand_offset = int(torch.randint(0, max_offset, (1,))) if max_offset > 0 else 0
+            inputs = torch.cat((inputs[rand_offset:, :], inputs_next[:rand_offset, :]), 0)
+
         # need transpose for [BatchSize, Channels, Sequence] format
         inputs = inputs.transpose(0, 1).contiguous()
 
-        if self.augmentate:
-            # add little augmentation
-            # (scale from 80 to 120%)
-            inputs = inputs * (0.8 + 0.4 * torch.rand(1))
+        # Most frequent value in the above array
+        labels_tensor = inputs[-1, :]
 
-            # and slowdown to 150%
+        # Now we can remove labels from inputs
+        inputs = inputs[:-1, :]
+
+
+        # find most frequent label
+        values, counts = torch.mode(labels_tensor)
+        if len(values.shape) == 0:
+            # values is 0-dim
+            label = values.to(dtype=torch.long)
+        else:
+            most_freq_label = values[torch.argmax(counts)]
+            freq = counts.max() / labels_tensor.shape[0]
+
+            # if sequence contains few styles then label it as transition
+            if freq > 0.75:  # len(set(labels_array)) == 1:
+                label = most_freq_label.to(dtype=torch.long)
+            else:
+                label = torch.tensor(0, dtype=torch.long)
+
+        if label != 0 and self.augmentate:
+            # add a little augmentation
+            # (scale from 50 to 150%)
+            inputs = inputs * (0.5 + 1. * torch.rand(1))
+
+            # and slowdown to (100+x)%
             inputs_3d = torch.zeros(1, inputs.size(0), inputs.size(1))
             inputs_3d[0] = inputs
             inputs_3d = Fun.interpolate(inputs_3d, scale_factor=1 + 0.5 * float(torch.rand(1)),
@@ -233,23 +273,8 @@ class CustomDataset(Dataset):
             inputs = inputs_3d[0][:, :inputs.size(1)]
 
             # add noise
-            inputs += torch.randn(inputs.size(0), inputs.size(1)) * 0.01
+            inputs += torch.randn(inputs.size(0), inputs.size(1)) * 0.005
 
-        # Most frequent value in the above array
-        labels_array = np.array(self.data[index][:, -1], dtype=int)
-        # most_freq_label = np.bincount(labels_array).argmax()
-        # final_label = most_freq_label
-
-        values, counts = np.unique(labels_array, return_counts=True)
-        most_freq_label = values[counts.argmax()]
-        freq = counts.max() / len(labels_array)
-
-        # if sequence contains few styles then label it as transition
-        if freq > 0.75:  # len(set(labels_array)) == 1:
-            final_label = most_freq_label  # labels_array[0]
-        else:
-            final_label = 0
-        label = torch.tensor(int(final_label), dtype=torch.long)
         return inputs, label
 
     def __len__(self):
@@ -263,6 +288,7 @@ def train(optimizer, num_epochs, continue_while_accuracy_is_improving=False):
     print("Begin training...")
     epoch = 1
     prev_accuracy, accuracy = -1.0, 0.0
+
     while epoch < num_epochs + 1 or (continue_while_accuracy_is_improving and accuracy > prev_accuracy):
         running_train_loss = 0.0
         running_accuracy = 0.0
@@ -271,7 +297,6 @@ def train(optimizer, num_epochs, continue_while_accuracy_is_improving=False):
 
         # Training Loop
         model.train()
-
         for inputs, outputs in train_loader:
             # forward + backward + optimize
             optimizer.zero_grad()  # zero the parameter gradients
@@ -366,12 +391,12 @@ train_data = df_train.values.reshape(-1, sample_len,
 validate_data = df_validate.values.reshape(-1, sample_len, input_channels_count + 1)
 test_data = df_test.values.reshape(-1, sample_len, input_channels_count + 1)
 
-train_dataset = CustomDataset(train_data, augmentate=True)
+train_dataset = CustomDataset(train_data, augmentate=1, shuffle=1, rand_offset=1)
 validate_dataset = CustomDataset(validate_data)
 test_dataset = CustomDataset(test_data)
 
 # Create data loaders
-batch_size = 64  # 4096 #32
+batch_size = 64  # 1024 #64  # 4096 #32
 kwargs = {'num_workers': 8, 'pin_memory': True} if device == 'cuda' else {}
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, **kwargs)
 validate_loader = DataLoader(validate_dataset, batch_size=batch_size, shuffle=False)
@@ -393,18 +418,21 @@ set_seeds(seed=SEED)
 # Define the loss function and optimizer
 # remove softmax end layer and change NLLLoss to CrossEntropyLoss
 loss_fn = nn.NLLLoss()  # nn.CrossEntropyLoss() #
-optimizers = [optim.Adam, optim.SGD]  # , optim.RMSprop]
-budget_epochs = [200, 30] #, 10]
+optimizers = [optim.Adam, optim.SGD, optim.RMSprop]
+budget_epochs_before_90_acc = [50, 30, 20]
+budget_epochs_after_90_acc = [20, 50, 20]
 
 validation_accuracy, test_accuracy = 0, 0
 hyperepoch = 0
 
+model_path = "NetModel.pth"
+
 # seems like we can train to 95% accuracy on test dataset
 # let's restart training with different optimizers
-while validation_accuracy < 95:
+while validation_accuracy < 97:
     # Initialize the CNN model
-    model = CNNModel(input_channels_count, num_classes, do_batchnorm=0, do_dropout=0)
-    model_path = "NetModel.pth"
+    model = CNNModel(input_channels_count, num_classes)
+
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path))
 
@@ -414,13 +442,14 @@ while validation_accuracy < 95:
     print(f"{selected_optimizer=}")
 
     # decrease start lr to the end
-    # learning_rate = 0.0001  # * (1 - 0.01 * test_accuracy)
-    # print(f"{learning_rate=}")
-    optimizer = selected_optimizer(model.parameters()) #, lr=learning_rate)
+    learning_rate = 0.0005  # * (1 - 0.01 * test_accuracy)
+    print(f"{learning_rate=}")
+    optimizer = selected_optimizer(model.parameters(), lr=learning_rate)
     # Training loop
     model.to(device)
 
-    num_epochs = budget_epochs[optim_index]
+    num_epochs = (budget_epochs_before_90_acc[optim_index] if validation_accuracy < 90
+                  else budget_epochs_after_90_acc[optim_index])
     validation_accuracy = train(optimizer, num_epochs, continue_while_accuracy_is_improving=True)
     print('Finished Training\n')
     test_accuracy = test(model_path, test_loader)
