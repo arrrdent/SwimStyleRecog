@@ -12,22 +12,13 @@ from sklearn.metrics import confusion_matrix
 import torch.nn.functional as Fun
 
 # 30 Hz data, sample_len sequence (sample_len/30 seconds)
-sample_len = 170
+sample_len = 180
 input_channels_count = 9
 labels = {0: 'null', 1: 'freestyle', 2: 'breaststroke', 3: 'backstroke', 4: 'butterfly'}  # , 5: 'turn'}
 
 # Define model parameters
 input_size = sample_len * input_channels_count  # how many features we initially feed the model
 num_classes = len(labels)  # The output is prediction results
-
-# Set device
-cuda = True
-device = torch.device("cuda" if (
-        torch.cuda.is_available() and cuda) else "cpu")
-torch.set_default_tensor_type("torch.FloatTensor")
-if device.type == "cuda":
-    torch.set_default_tensor_type("torch.cuda.FloatTensor")
-print(device)
 
 
 # if not os.path.exists("/content/SwimStyleRecog"):
@@ -38,7 +29,7 @@ print(device)
 
 
 def load_data():
-    train_ratio, validation_ratio, test_ratio = 0.6, 0.2, 0.2
+    train_ratio, validation_ratio, test_ratio = 0.5, 0.25, 0.25
 
     def separate_data(df, sample_len, train_ratio, validation_ratio, test_ratio):
         """
@@ -120,21 +111,11 @@ def load_data():
     merged_df_dict['test'].to_pickle("./df_test.pkl")
 
 
-# for first run
-if (not os.path.exists("./df_train.pkl") or not os.path.exists("./df_test.pkl")
-        or not os.path.exists("./df_validate.pkl")):
-    load_data()
-
-df_train = pd.read_pickle("./df_train.pkl")
-df_validate = pd.read_pickle("./df_validate.pkl")
-df_test = pd.read_pickle("./df_test.pkl")
-
-
 class CNNModel(nn.Module):
     # tests with batchnorm and dropout did not give better accuracy
     def __init__(self, in_ch, num_classes, do_batchnorm=False, do_dropout=False):
         super(CNNModel, self).__init__()
-        nn_size = [59, 22, 10, 5, 1]  # [59, 19, 5, 1] # [160, 40, 10, 1]
+        nn_size = [59, 19, 5, 1]  # [160, 40, 10, 1] # [59, 22, 10, 5, 1]  #
         drop_prob = [0.3, 0.2, 0.2, 0.1, 0.1, 0.1]
         self.do_batchnorm = do_batchnorm
         self.do_dropout = do_dropout
@@ -163,11 +144,11 @@ class CNNModel(nn.Module):
         self.elu4 = nn.ELU()
         self.max_pool4 = nn.MaxPool1d(kernel_size=3, stride=1)
 
-        self.conv5 = nn.Conv1d(nn_size[3], nn_size[4], kernel_size=3, stride=1)
-        self.drop5 = nn.Dropout(drop_prob[4])
-        self.bn5 = nn.BatchNorm1d(nn_size[4])
-        self.elu5 = nn.ELU()
-        self.max_pool5 = nn.MaxPool1d(kernel_size=3, stride=1)
+        # self.conv5 = nn.Conv1d(nn_size[3], nn_size[4], kernel_size=3, stride=1)
+        # self.drop5 = nn.Dropout(drop_prob[4])
+        # self.bn5 = nn.BatchNorm1d(nn_size[4])
+        # self.elu5 = nn.ELU()
+        # self.max_pool5 = nn.MaxPool1d(kernel_size=3, stride=1)
 
         self.fc = nn.Linear(in_features=sample_len - len(nn_size) * 4, out_features=128)
         self.drop_fc = nn.Dropout(drop_prob[5])
@@ -209,13 +190,13 @@ class CNNModel(nn.Module):
         if self.do_dropout:
             x = self.drop4(x)
 
-        x = self.conv5(x)
-        x = self.elu5(x)
-        x = self.max_pool5(x)
-        if self.do_batchnorm:
-            x = self.bn5(x)
-        if self.do_dropout:
-            x = self.drop5(x)
+        # x = self.conv5(x)
+        # x = self.elu5(x)
+        # x = self.max_pool5(x)
+        # if self.do_batchnorm:
+        #     x = self.bn5(x)
+        # if self.do_dropout:
+        #     x = self.drop5(x)
 
         x = x.view(x.size(0), -1)  # Flatten the tensor
         x = self.fc(x)
@@ -290,6 +271,7 @@ def train(optimizer, num_epochs, continue_while_accuracy_is_improving=False):
 
         # Training Loop
         model.train()
+
         for inputs, outputs in train_loader:
             # forward + backward + optimize
             optimizer.zero_grad()  # zero the parameter gradients
@@ -359,6 +341,24 @@ def test(model_path, loader):
     # Optional: Function to test which species were easier to predict
 
 
+# Set device
+cuda = True
+device = torch.device("cuda" if (
+        torch.cuda.is_available() and cuda) else "cpu")
+torch.set_default_tensor_type("torch.FloatTensor")
+if device.type == "cuda":
+    torch.set_default_tensor_type("torch.cuda.FloatTensor")
+print(device)
+
+# for first run
+if (not os.path.exists("./df_train.pkl") or not os.path.exists("./df_test.pkl")
+        or not os.path.exists("./df_validate.pkl")):
+    load_data()
+
+df_train = pd.read_pickle("./df_train.pkl")
+df_validate = pd.read_pickle("./df_validate.pkl")
+df_test = pd.read_pickle("./df_test.pkl")
+
 # Load data into a pandas DataFrame (assuming it's named 'df')
 # Prepare data by converting it into a format suitable for the custom dataset
 train_data = df_train.values.reshape(-1, sample_len,
@@ -377,7 +377,6 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, *
 validate_loader = DataLoader(validate_dataset, batch_size=batch_size, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-SEED = 1234
 
 def set_seeds(seed):
     """Set seeds for reproducibility."""
@@ -388,20 +387,14 @@ def set_seeds(seed):
 
 
 # set seed for reproducibility
+SEED = 42
 set_seeds(seed=SEED)
-
-# Initialize the CNN model
-model = CNNModel(input_channels_count, num_classes)
-model_path = "NetModel.pth"
-
-if os.path.exists(model_path):
-    model.load_state_dict(torch.load(model_path))
 
 # Define the loss function and optimizer
 # remove softmax end layer and change NLLLoss to CrossEntropyLoss
 loss_fn = nn.NLLLoss()  # nn.CrossEntropyLoss() #
 optimizers = [optim.Adam, optim.SGD]  # , optim.RMSprop]
-budget_epochs = [50, 30, 10]
+budget_epochs = [200, 30] #, 10]
 
 validation_accuracy, test_accuracy = 0, 0
 hyperepoch = 0
@@ -410,8 +403,7 @@ hyperepoch = 0
 # let's restart training with different optimizers
 while validation_accuracy < 95:
     # Initialize the CNN model
-    model = CNNModel(input_channels_count, num_classes)
-
+    model = CNNModel(input_channels_count, num_classes, do_batchnorm=0, do_dropout=0)
     model_path = "NetModel.pth"
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path))
@@ -422,9 +414,9 @@ while validation_accuracy < 95:
     print(f"{selected_optimizer=}")
 
     # decrease start lr to the end
-    learning_rate = 0.0005  # * (1 - 0.01 * test_accuracy)
-    print(f"{learning_rate=}")
-    optimizer = selected_optimizer(model.parameters(), lr=learning_rate)
+    # learning_rate = 0.0001  # * (1 - 0.01 * test_accuracy)
+    # print(f"{learning_rate=}")
+    optimizer = selected_optimizer(model.parameters()) #, lr=learning_rate)
     # Training loop
     model.to(device)
 
