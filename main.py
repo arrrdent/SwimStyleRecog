@@ -9,31 +9,16 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import confusion_matrix
+import torch.nn.functional as Fun
 
 # 30 Hz data, sample_len sequence (sample_len/30 seconds)
-sample_len = 90
+sample_len = 170
 input_channels_count = 9
 labels = {0: 'null', 1: 'freestyle', 2: 'breaststroke', 3: 'backstroke', 4: 'butterfly'}  # , 5: 'turn'}
 
 # Define model parameters
 input_size = sample_len * input_channels_count  # how many features we initially feed the model
-learning_rate = 0.0005
 num_classes = len(labels)  # The output is prediction results
-
-SEED = 1234
-
-model_path = "NetModel.pth"
-
-
-def set_seeds(seed=1234):
-    """Set seeds for reproducibility."""
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-
-# Set seeds for reproducibility
-set_seeds(seed=SEED)
 
 # Set device
 cuda = True
@@ -55,7 +40,7 @@ print(device)
 def load_data():
     train_ratio, validation_ratio, test_ratio = 0.6, 0.2, 0.2
 
-    def separate_data(df, sample_len, train_ratio=0.6, validation_ratio=0.2, test_ratio=0.2):
+    def separate_data(df, sample_len, train_ratio, validation_ratio, test_ratio):
         """
           separate data to train, validate, test dfs
           sample_len is rows count
@@ -143,68 +128,101 @@ if (not os.path.exists("./df_train.pkl") or not os.path.exists("./df_test.pkl")
 df_train = pd.read_pickle("./df_train.pkl")
 df_validate = pd.read_pickle("./df_validate.pkl")
 df_test = pd.read_pickle("./df_test.pkl")
-# df_train["label"].plot()
-# plt.show()
 
 
 class CNNModel(nn.Module):
-    def __init__(self, in_ch, output_classes):
+    # tests with batchnorm and dropout did not give better accuracy
+    def __init__(self, in_ch, num_classes, do_batchnorm=False, do_dropout=False):
         super(CNNModel, self).__init__()
-        #drop_prob = [0.5, 0.75, 0.25, 0.1, 0.25]
-        self.conv1 = nn.Conv1d(in_channels=in_ch, out_channels=59, kernel_size=3, stride=1)
-        #self.drop1 = nn.Dropout(drop_prob[0])
+        nn_size = [59, 22, 10, 5, 1]  # [59, 19, 5, 1] # [160, 40, 10, 1]
+        drop_prob = [0.3, 0.2, 0.2, 0.1, 0.1, 0.1]
+        self.do_batchnorm = do_batchnorm
+        self.do_dropout = do_dropout
+
+        self.conv1 = nn.Conv1d(in_channels=in_ch, out_channels=nn_size[0], kernel_size=3, stride=1)
+        self.drop1 = nn.Dropout(drop_prob[0])
+        self.bn1 = nn.BatchNorm1d(nn_size[0])
         self.elu1 = nn.ELU()
         self.max_pool1 = nn.MaxPool1d(kernel_size=3, stride=1)
 
-        self.conv2 = nn.Conv1d(59, 19, kernel_size=3, stride=1)
-        #self.drop2 = nn.Dropout(drop_prob[1])
+        self.conv2 = nn.Conv1d(nn_size[0], nn_size[1], kernel_size=3, stride=1)
+        self.drop2 = nn.Dropout(drop_prob[1])
+        self.bn2 = nn.BatchNorm1d(nn_size[1])
         self.elu2 = nn.ELU()
         self.max_pool2 = nn.MaxPool1d(kernel_size=3, stride=1)
 
-        self.conv3 = nn.Conv1d(19, 5, kernel_size=3, stride=1)
-        #self.drop3 = nn.Dropout(drop_prob[2])
+        self.conv3 = nn.Conv1d(nn_size[1], nn_size[2], kernel_size=3, stride=1)
+        self.drop3 = nn.Dropout(drop_prob[2])
+        self.bn3 = nn.BatchNorm1d(nn_size[2])
         self.elu3 = nn.ELU()
         self.max_pool3 = nn.MaxPool1d(kernel_size=3, stride=1)
 
-        self.conv4 = nn.Conv1d(5, 1, kernel_size=3, stride=1)
-        #self.drop4 = nn.Dropout(drop_prob[3])
+        self.conv4 = nn.Conv1d(nn_size[2], nn_size[3], kernel_size=3, stride=1)
+        self.drop4 = nn.Dropout(drop_prob[3])
+        self.bn4 = nn.BatchNorm1d(nn_size[3])
         self.elu4 = nn.ELU()
         self.max_pool4 = nn.MaxPool1d(kernel_size=3, stride=1)
 
-        self.fc = nn.Linear(in_features=sample_len - 16, out_features=128)
-        #self.drop_fc = nn.Dropout(drop_prob[4])
+        self.conv5 = nn.Conv1d(nn_size[3], nn_size[4], kernel_size=3, stride=1)
+        self.drop5 = nn.Dropout(drop_prob[4])
+        self.bn5 = nn.BatchNorm1d(nn_size[4])
+        self.elu5 = nn.ELU()
+        self.max_pool5 = nn.MaxPool1d(kernel_size=3, stride=1)
+
+        self.fc = nn.Linear(in_features=sample_len - len(nn_size) * 4, out_features=128)
+        self.drop_fc = nn.Dropout(drop_prob[5])
         self.elu_fc = nn.ELU()
-        self.fc2 = nn.Linear(in_features=128, out_features=output_classes)
+
+        self.fc2 = nn.Linear(in_features=128, out_features=num_classes)
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x):
         x = self.conv1(x)
-        # x = self.drop1(x)
-        # x = self.bn1(x)
         x = self.elu1(x)
         x = self.max_pool1(x)
+        if self.do_batchnorm:
+            x = self.bn1(x)
+        if self.do_dropout:
+            x = self.drop1(x)
 
         x = self.conv2(x)
-        # x = self.drop2(x)
-        # x = self.bn2(x)
         x = self.elu2(x)
         x = self.max_pool2(x)
+        if self.do_batchnorm:
+            x = self.bn2(x)
+        if self.do_dropout:
+            x = self.drop2(x)
 
         x = self.conv3(x)
-        # x = self.drop3(x)
-        # x = self.bn3(x)
         x = self.elu3(x)
         x = self.max_pool3(x)
+        if self.do_batchnorm:
+            x = self.bn3(x)
+        if self.do_dropout:
+            x = self.drop3(x)
 
         x = self.conv4(x)
-        # x = self.drop4(x)
-        # x = self.bn4(x)
         x = self.elu4(x)
         x = self.max_pool4(x)
+        if self.do_batchnorm:
+            x = self.bn4(x)
+        if self.do_dropout:
+            x = self.drop4(x)
+
+        x = self.conv5(x)
+        x = self.elu5(x)
+        x = self.max_pool5(x)
+        if self.do_batchnorm:
+            x = self.bn5(x)
+        if self.do_dropout:
+            x = self.drop5(x)
+
         x = x.view(x.size(0), -1)  # Flatten the tensor
         x = self.fc(x)
-        # x = self.drop_fc(x)
         x = self.elu_fc(x)
+        if self.do_dropout:
+            x = self.drop_fc(x)
+
         x = self.fc2(x)
         x = self.softmax(x)
         return x
@@ -212,13 +230,29 @@ class CNNModel(nn.Module):
 
 # Define a custom dataset
 class CustomDataset(Dataset):
-    def __init__(self, data):
+    def __init__(self, data, augmentate=False):
         self.data = data
+        self.augmentate = augmentate
 
     def __getitem__(self, index):
         inputs = torch.tensor(self.data[index][:, :-1], dtype=torch.float32)
         # need transpose for [BatchSize, Channels, Sequence] format
         inputs = inputs.transpose(0, 1).contiguous()
+
+        if self.augmentate:
+            # add little augmentation
+            # (scale from 80 to 120%)
+            inputs = inputs * (0.8 + 0.4 * torch.rand(1))
+
+            # and slowdown to 150%
+            inputs_3d = torch.zeros(1, inputs.size(0), inputs.size(1))
+            inputs_3d[0] = inputs
+            inputs_3d = Fun.interpolate(inputs_3d, scale_factor=1 + 0.5 * float(torch.rand(1)),
+                                        mode="linear", align_corners=False, recompute_scale_factor=False)
+            inputs = inputs_3d[0][:, :inputs.size(1)]
+
+            # add noise
+            inputs += torch.randn(inputs.size(0), inputs.size(1)) * 0.01
 
         # Most frequent value in the above array
         labels_array = np.array(self.data[index][:, -1], dtype=int)
@@ -241,37 +275,8 @@ class CustomDataset(Dataset):
         return len(self.data)
 
 
-# Load data into a pandas DataFrame (assuming it's named 'df')
-# Prepare data by converting it into a format suitable for the custom dataset
-train_data = df_train.values.reshape(-1, sample_len,
-                                     input_channels_count + 1)  # Reshape to (num_samples, sequence_length, num_features)
-validate_data = df_validate.values.reshape(-1, sample_len, input_channels_count + 1)
-test_data = df_test.values.reshape(-1, sample_len, input_channels_count + 1)
-
-train_dataset = CustomDataset(train_data)
-validate_dataset = CustomDataset(validate_data)
-test_dataset = CustomDataset(test_data)
-
-# Create data loaders
-batch_size = 64 #4096 #32
-kwargs = {'num_workers': 8, 'pin_memory': True} if device == 'cuda' else {}
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, **kwargs)
-validate_loader = DataLoader(validate_dataset, batch_size=batch_size, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-# Initialize the CNN model
-model = CNNModel(input_channels_count, num_classes)
-
-if os.path.exists(model_path):
-    model.load_state_dict(torch.load(model_path))
-
-# Define the loss function and optimizer
-loss_fn = nn.NLLLoss()  # nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-
 # Training Function
-def train(num_epochs, continue_while_accuracy_is_improving=False):
+def train(optimizer, num_epochs, continue_while_accuracy_is_improving=False):
     best_accuracy = 0.0
 
     print("Begin training...")
@@ -284,6 +289,7 @@ def train(num_epochs, continue_while_accuracy_is_improving=False):
         total = 0
 
         # Training Loop
+        model.train()
         for inputs, outputs in train_loader:
             # forward + backward + optimize
             optimizer.zero_grad()  # zero the parameter gradients
@@ -323,10 +329,11 @@ def train(num_epochs, continue_while_accuracy_is_improving=False):
             best_accuracy = accuracy
 
             # Print the statistics of the epoch
-        print('Completed training batch', epoch, 'Training Loss is: %.4f' % train_loss_value,
+        print('Completed training epoch', epoch, 'Training Loss is: %.4f' % train_loss_value,
               'Validation Loss is: %.4f' % val_loss_value, 'Accuracy is %d %%' % (accuracy))
 
         epoch += 1
+    return best_accuracy
 
 
 # Function to test the model
@@ -348,55 +355,127 @@ def test(model_path, loader):
             running_accuracy += (predicted == outputs).sum().item()
 
         print('Accuracy of the model based on the test set inputs is: %d %%' % (100 * running_accuracy / total))
-
+    return (100 * running_accuracy / (total if total != 0 else 1))
     # Optional: Function to test which species were easier to predict
 
 
-# Training loop
-model.to(device)
-model.train()
+# Load data into a pandas DataFrame (assuming it's named 'df')
+# Prepare data by converting it into a format suitable for the custom dataset
+train_data = df_train.values.reshape(-1, sample_len,
+                                     input_channels_count + 1)  # Reshape to (num_samples, sequence_length, num_features)
+validate_data = df_validate.values.reshape(-1, sample_len, input_channels_count + 1)
+test_data = df_test.values.reshape(-1, sample_len, input_channels_count + 1)
 
-num_epochs = 100
-train(num_epochs, continue_while_accuracy_is_improving=True)
-print('Finished Training\n')
-test(model_path, test_loader)
+train_dataset = CustomDataset(train_data, augmentate=True)
+validate_dataset = CustomDataset(validate_data)
+test_dataset = CustomDataset(test_data)
+
+# Create data loaders
+batch_size = 64  # 4096 #32
+kwargs = {'num_workers': 8, 'pin_memory': True} if device == 'cuda' else {}
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, **kwargs)
+validate_loader = DataLoader(validate_dataset, batch_size=batch_size, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+SEED = 1234
+
+def set_seeds(seed):
+    """Set seeds for reproducibility."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed) # multi-GPU
 
 
-y_pred = []
-y_true = []
+# set seed for reproducibility
+set_seeds(seed=SEED)
 
+# Initialize the CNN model
+model = CNNModel(input_channels_count, num_classes)
+model_path = "NetModel.pth"
 
-# Function to test the model
-def confusion_test(model_path, loader):
-    # Load the model that we saved at the end of the training loop
-    model = CNNModel(input_channels_count, num_classes)
+if os.path.exists(model_path):
     model.load_state_dict(torch.load(model_path))
 
-    running_accuracy = 0
-    total = 0
+# Define the loss function and optimizer
+# remove softmax end layer and change NLLLoss to CrossEntropyLoss
+loss_fn = nn.NLLLoss()  # nn.CrossEntropyLoss() #
+optimizers = [optim.Adam, optim.SGD]  # , optim.RMSprop]
+budget_epochs = [50, 30, 10]
 
-    with torch.no_grad():
-        for data in loader:
-            inputs, outputs = data
-            outputs = outputs.to(torch.float32)
-            predicted_outputs = model(inputs)
+validation_accuracy, test_accuracy = 0, 0
+hyperepoch = 0
 
-            output = (torch.max(torch.exp(predicted_outputs), 1)[1]).data.cpu().numpy()
-            y_pred.extend(output)  # Save Prediction
+# seems like we can train to 95% accuracy on test dataset
+# let's restart training with different optimizers
+while validation_accuracy < 95:
+    # Initialize the CNN model
+    model = CNNModel(input_channels_count, num_classes)
 
-            labels = outputs.data.cpu().numpy()
-            y_true.extend(labels)  # Save Truth
+    model_path = "NetModel.pth"
+    if os.path.exists(model_path):
+        model.load_state_dict(torch.load(model_path))
 
+    # select optimizer
+    optim_index = hyperepoch % len(optimizers)
+    selected_optimizer = optimizers[optim_index]
+    print(f"{selected_optimizer=}")
+
+    # decrease start lr to the end
+    learning_rate = 0.0005  # * (1 - 0.01 * test_accuracy)
+    print(f"{learning_rate=}")
+    optimizer = selected_optimizer(model.parameters(), lr=learning_rate)
+    # Training loop
+    model.to(device)
+
+    num_epochs = budget_epochs[optim_index]
+    validation_accuracy = train(optimizer, num_epochs, continue_while_accuracy_is_improving=True)
+    print('Finished Training\n')
+    test_accuracy = test(model_path, test_loader)
+    hyperepoch += 1
 
 # constant for classes
 classes = labels.values()
 
-confusion_test(model_path, train_loader)
-# Build confusion matrix
-cf_matrix = confusion_matrix(y_true, y_pred)
-df_cm = pd.DataFrame(cf_matrix / np.sum(cf_matrix, axis=1)[:, None], index=[i for i in classes],
-                     columns=[i for i in classes])
-# plt.figure(figsize = (12,7))
-sns.heatmap(df_cm, annot=True)
-plt.show()
-# plt.savefig('output.png')
+
+def draw_confusion_mat(loader):
+    y_pred = []
+    y_true = []
+
+    # Function to test the model
+    def confusion_test(model_path, loader):
+        # Load the model that we saved at the end of the training loop
+        model = CNNModel(input_channels_count, num_classes)
+        model.load_state_dict(torch.load(model_path))
+        model.eval()
+
+        running_accuracy = 0
+        total = 0
+
+        with torch.no_grad():
+            for data in loader:
+                inputs, outputs = data
+                outputs = outputs.to(torch.float32)
+                predicted_outputs = model(inputs)
+
+                output = (torch.max(torch.exp(predicted_outputs), 1)[1]).data.cpu().numpy()
+                y_pred.extend(output)  # Save Prediction
+
+                output_labels = outputs.data.cpu().numpy()
+                y_true.extend(output_labels)  # Save Truth
+
+    confusion_test(model_path, loader)
+    # Build confusion matrix
+
+    cf_matrix = confusion_matrix(y_true, y_pred)
+    df_cm = pd.DataFrame(cf_matrix / np.sum(cf_matrix, axis=1)[:, None], index=[i for i in classes],
+                         columns=[i for i in classes])
+
+    sns.heatmap(df_cm, annot=True)
+    plt.show()
+    # plt.savefig('output.png')
+
+
+draw_confusion_mat(test_loader)
+draw_confusion_mat(validate_loader)
+draw_confusion_mat(train_loader)
