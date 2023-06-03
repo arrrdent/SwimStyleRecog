@@ -244,7 +244,6 @@ class CustomDataset(Dataset):
         # Now we can remove labels from inputs
         inputs = inputs[:-1, :]
 
-
         # find most frequent label
         values, counts = torch.mode(labels_tensor)
         if len(values.shape) == 0:
@@ -273,7 +272,7 @@ class CustomDataset(Dataset):
             inputs = inputs_3d[0][:, :inputs.size(1)]
 
             # add noise
-            inputs += torch.randn(inputs.size(0), inputs.size(1)) * 0.005
+            inputs += torch.randn(inputs.size(0), inputs.size(1)) * 0.01
 
         return inputs, label
 
@@ -282,8 +281,8 @@ class CustomDataset(Dataset):
 
 
 # Training Function
-def train(optimizer, num_epochs, continue_while_accuracy_is_improving=False):
-    best_accuracy = 0.0
+def train(optimizer, num_epochs, best_validation_accuracy=0.0, continue_while_accuracy_is_improving=False):
+    best_accuracy = best_validation_accuracy
 
     print("Begin training...")
     epoch = 1
@@ -334,6 +333,7 @@ def train(optimizer, num_epochs, continue_while_accuracy_is_improving=False):
         if accuracy > best_accuracy:
             torch.save(model.state_dict(), model_path)
             best_accuracy = accuracy
+            print(f"Net model resaved with {accuracy=}")
 
             # Print the statistics of the epoch
         print('Completed training epoch', epoch, 'Training Loss is: %.4f' % train_loss_value,
@@ -353,6 +353,7 @@ def test(model_path, loader):
     total = 0
 
     with torch.no_grad():
+        model.eval()
         for data in loader:
             inputs, outputs = data
             outputs = outputs.to(torch.float32)
@@ -422,19 +423,21 @@ optimizers = [optim.Adam, optim.SGD, optim.RMSprop]
 budget_epochs_before_90_acc = [50, 30, 20]
 budget_epochs_after_90_acc = [20, 50, 20]
 
-validation_accuracy, test_accuracy = 0, 0
+best_validation_accuracy = 0
 hyperepoch = 0
 
 model_path = "NetModel.pth"
 
 # seems like we can train to 95% accuracy on test dataset
 # let's restart training with different optimizers
-while validation_accuracy < 97:
+while best_validation_accuracy < 95:
     # Initialize the CNN model
     model = CNNModel(input_channels_count, num_classes)
 
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path))
+        best_validation_accuracy = test(model_path, validate_loader)
+        print(f"Load model, {best_validation_accuracy=}")
 
     # select optimizer
     optim_index = hyperepoch % len(optimizers)
@@ -442,17 +445,19 @@ while validation_accuracy < 97:
     print(f"{selected_optimizer=}")
 
     # decrease start lr to the end
-    learning_rate = 0.0005  # * (1 - 0.01 * test_accuracy)
+    learning_rate = 0.001 * (1 - 0.01 * best_validation_accuracy)
     print(f"{learning_rate=}")
     optimizer = selected_optimizer(model.parameters(), lr=learning_rate)
     # Training loop
     model.to(device)
 
-    num_epochs = (budget_epochs_before_90_acc[optim_index] if validation_accuracy < 90
+    num_epochs = (budget_epochs_before_90_acc[optim_index] if best_validation_accuracy < 90
                   else budget_epochs_after_90_acc[optim_index])
-    validation_accuracy = train(optimizer, num_epochs, continue_while_accuracy_is_improving=True)
-    print('Finished Training\n')
-    test_accuracy = test(model_path, test_loader)
+    best_validation_accuracy = train(optimizer, num_epochs,
+                                     best_validation_accuracy=best_validation_accuracy,
+                                     continue_while_accuracy_is_improving=True)
+    print('Finished Training, check model on test dataset:')
+    test(model_path, test_loader)
     hyperepoch += 1
 
 # constant for classes
