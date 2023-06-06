@@ -445,7 +445,7 @@ while best_validation_accuracy < 95:
     print(f"{selected_optimizer=}")
 
     # decrease start lr to the end
-    learning_rate = 0.001 * (1 - 0.01 * best_validation_accuracy)
+    learning_rate = 0.001 * (1 - 0.01 * best_validation_accuracy) # or simple 0.0005
     print(f"{learning_rate=}")
     optimizer = selected_optimizer(model.parameters(), lr=learning_rate)
     # Training loop
