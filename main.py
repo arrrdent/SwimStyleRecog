@@ -281,7 +281,7 @@ class CustomDataset(Dataset):
 
 
 # Training Function
-def train(optimizer, num_epochs, best_validation_accuracy=0.0, continue_while_accuracy_is_improving=False):
+def train(model, optimizer, num_epochs, best_validation_accuracy=0.0, continue_while_accuracy_is_improving=False):
     best_accuracy = best_validation_accuracy
 
     print("Begin training...")
@@ -291,7 +291,7 @@ def train(optimizer, num_epochs, best_validation_accuracy=0.0, continue_while_ac
     while epoch < num_epochs + 1 or (continue_while_accuracy_is_improving and accuracy > prev_accuracy):
         running_train_loss = 0.0
         running_accuracy = 0.0
-        running_vall_loss = 0.0
+        running_val_loss = 0.0
         total = 0
 
         # Training Loop
@@ -318,12 +318,12 @@ def train(optimizer, num_epochs, best_validation_accuracy=0.0, continue_while_ac
 
                 # The label with the highest value will be our prediction
                 _, predicted = torch.max(predicted_outputs, 1)
-                running_vall_loss += val_loss.item()
+                running_val_loss += val_loss.item()
                 total += outputs.size(0)
                 running_accuracy += (predicted == outputs).sum().item()
 
                 # Calculate validation loss value
-        val_loss_value = running_vall_loss / len(validate_loader)
+        val_loss_value = running_val_loss / len(validate_loader)
 
         prev_accuracy = accuracy
         # Calculate accuracy as the number of correct predictions in the validation batch divided by the total number of predictions done.
@@ -344,9 +344,9 @@ def train(optimizer, num_epochs, best_validation_accuracy=0.0, continue_while_ac
 
 
 # Function to test the model
-def test(model_path, loader):
+def test(model_path, loader, do_batchnorm):
     # Load the model that we saved at the end of the training loop
-    model = CNNModel(input_channels_count, num_classes)
+    model = CNNModel(input_channels_count, num_classes, do_batchnorm=do_batchnorm)
     model.load_state_dict(torch.load(model_path))
 
     running_accuracy = 0
@@ -392,6 +392,7 @@ train_data = df_train.values.reshape(-1, sample_len,
 validate_data = df_validate.values.reshape(-1, sample_len, input_channels_count + 1)
 test_data = df_test.values.reshape(-1, sample_len, input_channels_count + 1)
 
+# !set augmentation and offsetting using!
 train_dataset = CustomDataset(train_data, augmentate=1, shuffle=1, rand_offset=1)
 validate_dataset = CustomDataset(validate_data)
 test_dataset = CustomDataset(test_data)
@@ -423,7 +424,7 @@ optimizers = [optim.Adam, optim.SGD, optim.RMSprop]
 budget_epochs_before_90_acc = [50, 30, 20]
 budget_epochs_after_90_acc = [20, 50, 20]
 
-best_validation_accuracy = 0
+best_validation_accuracy, best_using_bn = 0, 0
 hyperepoch = 0
 
 model_path = "NetModel.pth"
@@ -432,11 +433,12 @@ model_path = "NetModel.pth"
 # let's restart training with different optimizers
 while best_validation_accuracy < 95:
     # Initialize the CNN model
-    model = CNNModel(input_channels_count, num_classes)
+    using_bn = not ((hyperepoch // len(optimizers)) % 2)
+    model = CNNModel(input_channels_count, num_classes, do_batchnorm=using_bn)
 
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path))
-        best_validation_accuracy = test(model_path, validate_loader)
+        best_validation_accuracy = test(model_path, validate_loader, using_bn)
         print(f"Load model, {best_validation_accuracy=}")
 
     # select optimizer
@@ -445,7 +447,7 @@ while best_validation_accuracy < 95:
     print(f"{selected_optimizer=}")
 
     # decrease start lr to the end
-    learning_rate = 0.001 * (1 - 0.01 * best_validation_accuracy) # or simple 0.0005
+    learning_rate = 0.001 * (1 - 0.01 * best_validation_accuracy)  # or simple 0.0005
     print(f"{learning_rate=}")
     optimizer = selected_optimizer(model.parameters(), lr=learning_rate)
     # Training loop
@@ -453,11 +455,12 @@ while best_validation_accuracy < 95:
 
     num_epochs = (budget_epochs_before_90_acc[optim_index] if best_validation_accuracy < 90
                   else budget_epochs_after_90_acc[optim_index])
-    best_validation_accuracy = train(optimizer, num_epochs,
+    best_validation_accuracy = train(model, optimizer, num_epochs,
                                      best_validation_accuracy=best_validation_accuracy,
                                      continue_while_accuracy_is_improving=True)
     print('Finished Training, check model on test dataset:')
-    test(model_path, test_loader)
+    # test best saved model
+    test(model_path, test_loader, using_bn)
     hyperepoch += 1
 
 # constant for classes
